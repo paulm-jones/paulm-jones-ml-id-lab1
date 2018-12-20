@@ -1,0 +1,228 @@
+---
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'AWS CloudFormation ML Lab Seed Template.'
+Parameters:
+  YourInitials:
+    Description: Enter your initials and use them throughout the labs
+    Type: String
+    MinLength: 2
+  MovieLensDataSet:
+    Description: The name of the movielens dataset
+    Type: String
+    MinLength: 0
+    Default: ml-100k
+  CreateGlueCrawler:
+    Description: Create and run GlueCrawler automatically
+    Default: no
+    Type: String
+    AllowedValues:
+      - yes
+      - no
+    ConstraintDescription: must specify yes or no.
+
+Conditions:
+  CreateGlueCrawlerResources: !Equals [ !Ref CreateGlueCrawler, yes ]
+
+Resources:
+
+  S3Bucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName:
+        Fn::Join:
+        - ''
+        - - Ref: 'YourInitials'
+          - "-ml-id-lab"
+
+  MovieLensDataTransfer:
+    Type: Custom::MovieLensDataTransfer
+    Properties:
+      ServiceToken:
+        Fn::GetAtt:
+        - MovieLensDataTransferFunction
+        - Arn
+      Region:
+        Ref: AWS::Region
+      BucketName:
+        !Ref 'S3Bucket'
+      DatasetName:
+        !Ref MovieLensDataSet
+
+  MovieLensDataTransferFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Code:
+        S3Bucket:
+          !Sub peerjako-workshop-${AWS::Region}
+        S3Key:
+          "ml-id/customresources"
+      Handler:
+        "CFCustomResources::CFCustomResources.Function::MovieLensDataTransferAsync"
+      Role:
+        Fn::GetAtt:
+        - LambdaExecutionRole
+        - Arn
+      Runtime: dotnetcore2.1
+      Timeout: '300'
+
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service:
+            - lambda.amazonaws.com
+          Action:
+          - sts:AssumeRole
+      Path: "/"
+      Policies:
+      - PolicyName: root
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Effect: Allow
+            Action:
+            - logs:CreateLogGroup
+            - logs:CreateLogStream
+            - logs:PutLogEvents
+            Resource: arn:aws:logs:*:*:*
+          - Effect: Allow
+            Action:
+            - s3:PutObject
+            Resource:
+              Fn::Join:
+              - ''
+              - - "arn:aws:s3:::"
+                - Ref: 'S3Bucket'
+                - "/*"
+
+  SagemakerExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service:
+            - sagemaker.amazonaws.com
+          Action:
+          - sts:AssumeRole
+      ManagedPolicyArns:
+      - "arn:aws:iam::aws:policy/AmazonSageMakerFullAccess"
+      - "arn:aws:iam::aws:policy/AWSCloudFormationReadOnlyAccess"
+      - "arn:aws:iam::aws:policy/AmazonAthenaFullAccess"
+      Path: "/"
+      Policies:
+      - PolicyName: root
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Effect: Allow
+            Action:
+            - s3:ListBucket
+            Resource:
+              Fn::Join:
+              - ''
+              - - "arn:aws:s3:::"
+                - Ref: 'S3Bucket'
+          - Effect: Allow
+            Action:
+            - s3:GetObject
+            - s3:PutObject
+            - s3:DeleteObject
+            Resource:
+              Fn::Join:
+              - ''
+              - - "arn:aws:s3:::"
+                - Ref: 'S3Bucket'
+                - "/*"
+
+  GlueDatabase:
+    Type: AWS::Glue::Database
+    Properties:
+      DatabaseInput:
+        Name:
+          Fn::Join:
+          - ''
+          - - Ref: 'YourInitials'
+            - "-ml-lab-movielens"
+        Description: "Glue database used for ML Immersion Day"
+      CatalogId: !Ref AWS::AccountId
+
+  GlueServiceRole:
+    Type: AWS::IAM::Role
+    Condition: CreateGlueCrawlerResources
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          -
+            Effect: "Allow"
+            Principal:
+              Service:
+                - "glue.amazonaws.com"
+            Action:
+              - "sts:AssumeRole"
+      ManagedPolicyArns:
+      - "arn:aws:iam::aws:policy/service-role/AWSGlueServiceRole"
+      Path: "/"
+      Policies:
+      - PolicyName: root
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Effect: Allow
+            Action:
+            - s3:GetObject
+            - s3:PutObject
+            Resource:
+              Fn::Join:
+              - ''
+              - - "arn:aws:s3:::"
+                - Ref: 'S3Bucket'
+                - "/*"
+
+  GlueCrawler:
+    Type: AWS::Glue::Crawler
+    DependsOn: MovieLensDataTransfer
+    Condition: CreateGlueCrawlerResources
+    Properties:
+      Role: !GetAtt GlueServiceRole.Arn
+      DatabaseName: !Ref GlueDatabase
+      Targets:
+        S3Targets:
+          - Path:
+              Fn::Join:
+              - ''
+              - - Ref: 'S3Bucket'
+                - "/movielens-data"
+      SchemaChangePolicy:
+        UpdateBehavior: "UPDATE_IN_DATABASE"
+        DeleteBehavior: "LOG"
+
+
+Outputs:
+
+  BucketName:
+    Description: Name of the S3 bucket with movie data and lab data.
+    Value: !Ref 'S3Bucket'
+
+  GlueDataBaseName:
+    Description: Name of the Glue Database used for movie data tables.
+    Value: !Ref 'GlueDatabase'
+
+  StackType:
+    Description: Hardcoded Stack ID
+    Value: ml-id-lab1
+
+  StackInitials:
+    Description: The initials as provided to the template during instantiation
+    Value: !Ref 'YourInitials'
+
+  SagemakerRoleArn:
+    Description: The Arn to be used by sagemaker
+    Value: !GetAtt SagemakerExecutionRole.Arn
